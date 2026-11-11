@@ -1,3 +1,33 @@
+# Study Tracker — APK
+
+HSC Study Reminder & Lecture Tracker (in-app YouTube player + yt-dlp downloader)।
+
+**সরাসরি APK ডাউনলোড:** https://github.com/HasibApps/apk-01/releases/latest
+
+| | |
+|---|---|
+| Package | `com.aistudio.studytracker.kzrm` |
+| Version | 1.0 (versionCode 1) |
+| ABI | arm64-v8a |
+| Min Android | 7.0 (API 24) |
+| Target SDK | 36 |
+| সাইজ | ~58 MB |
+
+## GitHub Actions দিয়ে বিল্ড
+
+`.github/workflows/build-apk.yml` প্রতিটি `main` / `arena/**` ব্রাঞ্চ পুশে এবং
+Actions ট্যাব থেকে ম্যানুয়াল "Run workflow"-তে চলে:
+
+1. JDK 21 + Gradle 9.3.1 সেটআপ
+2. `debug.keystore` রিস্টোর (বেস64: `keystore/debug.keystore.b64`)
+3. `gradle assembleDebug`
+4. APK যাচাই (badging, ABI, signature)
+5. Artifact আপলোড + GitHub Release `v1.0.0`-এ APK পাবলিশ
+
+লোকাল বিল্ডের জন্য দেখুন `TERMUX_BUILD.md`।
+
+---
+
 <div align="center">
 <img width="1200" height="475" alt="GHBanner" src="https://ai.google.dev/static/site-assets/images/share-ais-513315318.png" />
 </div>
