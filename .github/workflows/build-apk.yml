@@ -61,30 +61,11 @@ jobs:
         run: |
           set -o pipefail
           gradle assembleDebug --no-daemon --stacktrace --warning-mode=summary 2>&1 | tee build.log
-          status=${PIPESTATUS[0]}
-          if [ "$status" -ne 0 ]; then
-            echo "### ❌ Build failed" >> "$GITHUB_STEP_SUMMARY"
-            grep -nE "e: |error:|FAILURE:|What went wrong|Caused by|Could not (resolve|find|GET|download)|Unresolved reference|> Task .* FAILED" build.log \
-              | tail -40 >> "$GITHUB_STEP_SUMMARY" || true
-          fi
-          exit "$status"
+          exit ${PIPESTATUS[0]}
 
-      - name: Report build errors as annotations
+      - name: Report build errors
         if: failure()
-        run: |
-          {
-            echo "## ❌ Gradle build failed"
-            echo '```'
-            grep -nE "e: |error:|FAILURE:|What went wrong|Caused by|Could not (resolve|find|GET|download)|Unresolved reference|> Task .* FAILED|A problem occurred" build.log 2>/dev/null | tail -60
-            echo '```'
-          } > errors.md
-          python3 - <<'PY' >> "$GITHUB_STEP_SUMMARY"
-          import os
-          p = "errors.md"
-          if os.path.exists(p):
-              print(open(p, encoding="utf-8", errors="replace").read()[:60000])
-          PY
-          echo "::error title=Gradle build failed::$(grep -E 'e: |error:|What went wrong|Caused by|Could not resolve|Unresolved reference' build.log 2>/dev/null | tail -5 | tr '\n' '|' | cut -c1-800)"
+        run: python3 .github/scripts/report_build_errors.py
 
       - name: Collect APK
         if: success()
