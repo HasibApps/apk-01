@@ -67,6 +67,28 @@ jobs:
         if: failure()
         run: python3 .github/scripts/report_build_errors.py
 
+      - name: Verify APK
+        if: success()
+        run: |
+          APK=app/build/outputs/apk/debug/app-debug.apk
+          BT=$(ls -d "$ANDROID_HOME"/build-tools/* | sort -V | tail -1)
+          echo "build-tools: $BT"
+          INFO=$("$BT/aapt2" dump badging "$APK" | grep -E "^package:|^sdkVersion|^targetSdkVersion|^application-label:|^native-code" )
+          SIG=$("$BT/apksigner" verify --print-certs "$APK" 2>&1 | head -4)
+          SO=$(unzip -l "$APK" | grep -oE "lib/[^/]+/" | cut -d/ -f2 | sort -u | tr '\n' ' ')
+          note() { printf '::notice title=APK verified::%s\n' "$(printf '%s' "$1" | sed ':a;N;$!ba;s/\n/%0A/g')"; }
+          note "$INFO"
+          note "libs: $SO"
+          note "$SIG"
+          {
+            echo "### 📦 APK যাচাই"
+            echo '```'
+            echo "$INFO"
+            echo "libs: $SO"
+            echo "$SIG"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
       - name: Collect APK
         if: success()
         run: |
