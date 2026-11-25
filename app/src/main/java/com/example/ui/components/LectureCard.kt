@@ -9,7 +9,6 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.aspectRatio
-import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
@@ -71,6 +70,7 @@ fun LectureCard(
     onToggleFavorite: () -> Unit,
     onToggleCompleted: () -> Unit,
     onLongClick: (() -> Unit)? = null,
+    onDownloadVideo: (() -> Unit)? = null,
     modifier: Modifier = Modifier
 ) {
     val videoId = remember(lecture.link) { StudyUtils.extractYouTubeVideoId(lecture.link) }
@@ -252,6 +252,14 @@ fun LectureCard(
                     onClick = { menuOpen = false; onToggleCompleted() },
                     modifier = Modifier.testTag("complete_btn_${lecture.id}")
                 )
+                if (onDownloadVideo != null) {
+                    DropdownMenuItem(
+                        text = { Text("ভিডিও ডাউনলোড") },
+                        leadingIcon = { Icon(Icons.Default.Download, null, tint = MaterialTheme.colorScheme.onSurfaceVariant) },
+                        onClick = { menuOpen = false; onDownloadVideo() },
+                        modifier = Modifier.testTag("download_btn_${lecture.id}")
+                    )
+                }
                 if (onLongClick != null) {
                     DropdownMenuItem(
                         text = { Text("এডিট / মুছুন") },

@@ -1,6 +1,11 @@
 package com.example
 
+import android.Manifest
+import android.content.pm.PackageManager
+import android.os.Build
 import android.os.Bundle
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.core.content.ContextCompat
 import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
@@ -43,6 +48,7 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
+        requestNeededPermissions()
 
         setContent {
             val themeMode by viewModel.themeMode.collectAsState()
@@ -56,6 +62,21 @@ class MainActivity : ComponentActivity() {
                 StudyTrackerApp(viewModel = viewModel)
             }
         }
+    }
+
+    private val permissionLauncher =
+        registerForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { }
+
+    /** ডাউনলোড নোটিফিকেশন (Android 13+) ও PDF পৃষ্ঠা সেভ (Android 9 ও নিচে) এর অনুমতি */
+    private fun requestNeededPermissions() {
+        val needed = mutableListOf<String>()
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
+            ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
+        ) needed.add(Manifest.permission.POST_NOTIFICATIONS)
+        if (Build.VERSION.SDK_INT <= Build.VERSION_CODES.P &&
+            ContextCompat.checkSelfPermission(this, Manifest.permission.WRITE_EXTERNAL_STORAGE) != PackageManager.PERMISSION_GRANTED
+        ) needed.add(Manifest.permission.WRITE_EXTERNAL_STORAGE)
+        if (needed.isNotEmpty()) permissionLauncher.launch(needed.toTypedArray())
     }
 }
 
@@ -206,6 +227,9 @@ fun StudyTrackerApp(viewModel: StudyViewModel) {
                         },
                         onSaveNotes = { subId, notes ->
                             viewModel.saveNotes(subId, notes)
+                        },
+                        onDeleteDownloadedVideo = { subId, lecId ->
+                            viewModel.removeDownloadedVideo(subId, lecId)
                         },
                         modifier = Modifier.padding(innerPadding)
                     )

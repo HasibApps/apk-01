@@ -107,6 +107,7 @@ fun SubjectDetailScreen(
     onDeleteAllLectures: (subjectId: String) -> Unit,
     onDeleteLecture: (subjectId: String, lectureId: Int) -> Unit,
     onSaveNotes: (subjectId: String, notes: String) -> Unit,
+    onDeleteDownloadedVideo: (subjectId: String, lectureId: Int) -> Unit = { _, _ -> },
     modifier: Modifier = Modifier
 ) {
     val activePaper = subject.papers.getOrNull(subject.activePaperIndex) ?: subject.papers.firstOrNull()
@@ -123,6 +124,8 @@ fun SubjectDetailScreen(
     var showDeleteAllLecturesDialog by remember { mutableStateOf(false) }
     var showNotesDialog by remember { mutableStateOf(false) }
     var lectureToEditOrDelete by remember { mutableStateOf<Lecture?>(null) }
+    // মেনু থেকে "ভিডিও ডাউনলোড" চাপা লেকচারের আইডি (ডায়ালগ খুলতে)
+    var lectureIdToDownload by remember { mutableStateOf<Int?>(null) }
 
     // Helper to guard actions with password "hasib99"
     fun executeProtectedAction(actionName: String, onExecute: () -> Unit) {
@@ -567,11 +570,33 @@ fun SubjectDetailScreen(
                         },
                         onLongClick = {
                             lectureToEditOrDelete = lecture
+                        },
+                        onDownloadVideo = {
+                            lectureIdToDownload = lecture.id
                         }
                     )
                 }
             }
         }
+    }
+
+    // ⋮ মেনু → ভিডিও ডাউনলোড (ব্যাকগ্রাউন্ডে চলে, নোটিফিকেশনে % / MB দেখায়)
+    val dlLecture = lectureIdToDownload?.let { id -> activeChapter?.lectures?.firstOrNull { it.id == id } }
+    if (dlLecture != null) {
+        com.example.ui.components.DownloadDialog(
+            lecture = dlLecture,
+            subjectId = subject.id,
+            subjectName = subject.name,
+            chapterName = activeChapter?.name ?: "",
+            onDismiss = { lectureIdToDownload = null },
+            onPlayOffline = {
+                lectureIdToDownload = null
+                onPlayLecture(subject.id, subject.name, activeChapter?.name ?: "", dlLecture)
+            },
+            onDeleteVideo = {
+                onDeleteDownloadedVideo(subject.id, dlLecture.id)
+            }
+        )
     }
 
     // Long Press: Edit Title and Delete Single Lecture Dialog (Requirement 2)

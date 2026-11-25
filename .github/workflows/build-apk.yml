@@ -6,18 +6,18 @@ on:
       - main
       - master
       - "arena/**"
-  workflow_dispatch:   # Actions ট্যাব থেকে "Run workflow" চাপলেও বিল্ড হবে
+  workflow_dispatch:
 
 permissions:
-  contents: write      # Release তৈরি ও APK আপলোডের জন্য
+  contents: write
 
 concurrency:
   group: build-apk-${{ github.ref }}
   cancel-in-progress: false
 
 env:
-  APK_NAME: Study-Tracker-v1.0.0-arm64-v8a.apk
-  RELEASE_TAG: v1.0.0
+  APK_NAME: StudyTracker-v4.0.0-arm64-v8a.apk
+  RELEASE_TAG: v4.0.0
 
 jobs:
   build:
@@ -38,29 +38,34 @@ jobs:
           yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses > /dev/null || true
           echo "sdk.dir=$ANDROID_HOME" > local.properties
 
-      - name: Restore debug.keystore
+      - name: Restore signing keystore
         run: |
+          # একই persistent keystore বজায় রাখা হচ্ছে — v3.0.0 এবং v4.0.0 একই কী দিয়ে সাইনড,
+          # যাতে ব্যবহারকারী আনইনস্টল না করেই আপডেট করতে পারেন।
           if [ -f keystore/debug.keystore.b64 ]; then
             base64 -d keystore/debug.keystore.b64 > debug.keystore
           fi
           if [ ! -f debug.keystore ]; then
-            keytool -genkey -v -keystore debug.keystore -storepass android \
-              -alias androiddebugkey -keypass android -keyalg RSA -keysize 2048 \
-              -validity 10000 -dname "CN=Android Debug,O=Android,C=US"
+            echo "::error::Persistent keystore not found at keystore/debug.keystore.b64"
+            exit 1
           fi
-          keytool -list -keystore debug.keystore -storepass android | tail -3
+          echo "== Keystore fingerprint =="
+          keytool -list -v -keystore debug.keystore -storepass android -alias androiddebugkey | grep -E "SHA1:|SHA256:|Alias name|Owner:|Valid from" | head -6
 
       - name: Set up Gradle 9.3.1
         uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: 9.3.1
 
-      # Gradle এর আসল এরর GitHub log এ দেখা যায় না বলে
-      # ফেইল করলে এরর লাইনগুলো check-run annotation হিসেবে দেখানো হয়।
-      - name: Build debug APK
+      - name: Build release APK (signed)
+        env:
+          KEYSTORE_PATH: ${{ github.workspace }}/debug.keystore
+          STORE_PASSWORD: android
+          KEY_ALIAS: androiddebugkey
+          KEY_PASSWORD: android
         run: |
           set -o pipefail
-          gradle assembleDebug --no-daemon --stacktrace --warning-mode=summary 2>&1 | tee build.log
+          gradle assembleRelease --no-daemon --stacktrace --warning-mode=summary 2>&1 | tee build.log
           exit ${PIPESTATUS[0]}
 
       - name: Report build errors
@@ -70,18 +75,18 @@ jobs:
       - name: Verify APK
         if: success()
         run: |
-          APK=app/build/outputs/apk/debug/app-debug.apk
+          APK=app/build/outputs/apk/release/app-release.apk
           BT=$(ls -d "$ANDROID_HOME"/build-tools/* | sort -V | tail -1)
           echo "build-tools: $BT"
           INFO=$("$BT/aapt2" dump badging "$APK" | grep -E "^package:|^sdkVersion|^targetSdkVersion|^application-label:|^native-code" )
-          SIG=$("$BT/apksigner" verify --print-certs "$APK" 2>&1 | head -4)
+          SIG=$("$BT/apksigner" verify --print-certs "$APK" 2>&1 | head -8)
           SO=$(unzip -l "$APK" | grep -oE "lib/[^/]+/" | cut -d/ -f2 | sort -u | tr '\n' ' ')
           note() { printf '::notice title=APK verified::%s\n' "$(printf '%s' "$1" | sed ':a;N;$!ba;s/\n/%0A/g')"; }
           note "$INFO"
           note "libs: $SO"
           note "$SIG"
           {
-            echo "### 📦 APK যাচাই"
+            echo "### 📦 APK যাচাই (v4.0.0)"
             echo '```'
             echo "$INFO"
             echo "libs: $SO"
@@ -93,7 +98,7 @@ jobs:
         if: success()
         run: |
           mkdir -p out
-          cp app/build/outputs/apk/debug/app-debug.apk "out/$APK_NAME"
+          cp app/build/outputs/apk/release/app-release.apk "out/$APK_NAME"
           ls -lh out
           sha256sum "out/$APK_NAME" | tee out/sha256.txt
 
@@ -101,8 +106,10 @@ jobs:
         if: success()
         uses: actions/upload-artifact@v4
         with:
-          name: StudyTracker-debug-apk
-          path: out/*.apk
+          name: StudyTracker-v4.0.0-signed-apk
+          path: |
+            out/*.apk
+            out/sha256.txt
           if-no-files-found: error
 
       - name: Publish GitHub Release
@@ -110,25 +117,36 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ env.RELEASE_TAG }}
-          name: Study Tracker v1.0.0 (arm64-v8a)
+          name: Study Tracker v4.0.0 (arm64-v8a)
           body: |
+            ## Study Tracker v4.0.0
+
             **Study Tracker** — HSC Study Reminder & Lecture Tracker with in-app YouTube player + yt-dlp downloader.
 
-            | | |
+            | Field | Value |
             |---|---|
-            | Version | 1.0 (versionCode 1) |
+            | Version | 4.0.0 (versionCode 4) |
+            | Package | `com.aistudio.studytracker.kzrm` |
             | ABI | arm64-v8a |
             | Min Android | 7.0 (API 24) |
             | Target / Compile SDK | 36 |
-            | Signing | debug keystore (sideload only) |
+            | Signing | Same persistent keystore as v3.0.0 (update-safe, no uninstall needed) |
+            | Source | `Study_App_YTDL_v5nov25.zip` |
             | Commit | `${{ github.sha }}` |
             | Build | #${{ github.run_number }} — ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }} |
 
-            ### ইনস্টল করার নিয়ম
-            1. নিচের `.apk` ফাইলটি ডাউনলোড করুন।
+            ### ইনস্টল / আপডেট
+            1. নিচের **StudyTracker-v4.0.0-arm64-v8a.apk** ডাউনলোড করুন।
             2. ফোনে "Unknown sources / Install unknown apps" অনুমতি দিন।
-            3. APK খুলে Install চাপুন। (Play Store-এ প্রকাশের জন্য নয় — এটি debug-signed)
-          files: out/*.apk
+            3. APK খুলে Install/Update চাপুন।
+
+            > ✅ এই APK **v3.0.0 এর একই signing key** দিয়ে সাইন করা হয়েছে। তাই v3.0.0 ইনস্টল থাকা অবস্থায় সরাসরি v4.0.0 আপডেট করা যাবে — **আনইনস্টল করার দরকার নেই**।
+
+            ### SHA256
+            `sha256.txt` ফাইলটি এই release-এর সাথে সংযুক্ত আছে।
+          files: |
+            out/*.apk
+            out/sha256.txt
           fail_on_unmatched_files: true
           make_latest: true
           draft: false
@@ -138,12 +156,12 @@ jobs:
         if: success()
         run: |
           {
-            echo "### ✅ APK তৈরি হয়েছে"
+            echo "### ✅ Study Tracker v4.0.0 APK তৈরি হয়েছে"
             echo ""
             echo '```'
             sha256sum "out/$APK_NAME"
             ls -lh "out/$APK_NAME"
             echo '```'
             echo ""
-            echo "**রিলিজ লিংক:** ${{ github.server_url }}/${{ github.repository }}/releases/tag/${{ env.RELEASE_TAG }}"
+            echo "**Release:** ${{ github.server_url }}/${{ github.repository }}/releases/tag/${{ env.RELEASE_TAG }}"
           } >> "$GITHUB_STEP_SUMMARY"

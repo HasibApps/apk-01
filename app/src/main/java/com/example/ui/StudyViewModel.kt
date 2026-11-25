@@ -10,6 +10,7 @@ import com.example.model.Lecture
 import com.example.model.StudyUtils
 import com.example.model.Subject
 import com.example.model.ThemeMode
+import com.example.model.withLocalVideoPath
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -62,6 +63,29 @@ class StudyViewModel(application: Application) : AndroidViewModel(application) {
 
     init {
         loadData()
+        // ব্যাকগ্রাউন্ডে ডাউনলোড শেষ হলে (যেকোনো অধ্যায়/পেজ থেকেই শুরু হোক) সঠিক লেকচারে পাথ সেভ
+        com.example.util.DownloadTracker.completionHandler = { item, path -> onVideoDownloaded(item, path) }
+    }
+
+    override fun onCleared() {
+        com.example.util.DownloadTracker.completionHandler = null
+        super.onCleared()
+    }
+
+    private fun onVideoDownloaded(item: com.example.util.DownloadTracker.Item, path: String): Boolean {
+        val updated = _subjects.value.withLocalVideoPath(item.subjectId, item.chapterName, item.lectureId, path)
+            ?: return false
+        _subjects.value = updated
+        repository.saveSubjects(updated)
+
+        // এই লেকচারই এখন চলছে হলে প্লেয়ারও আপডেট
+        val playing = _activePlayingLecture.value
+        if (playing != null && playing.subjectId == item.subjectId &&
+            playing.chapterName == item.chapterName && playing.lecture.id == item.lectureId
+        ) {
+            _activePlayingLecture.value = playing.copy(lecture = playing.lecture.copy(localVideoPath = path))
+        }
+        return true
     }
 
     private fun loadData() {

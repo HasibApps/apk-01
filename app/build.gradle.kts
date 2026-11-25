@@ -17,8 +17,8 @@ android {
     applicationId = "com.aistudio.studytracker.kzrm"
     minSdk = 24
     targetSdk = 36
-    versionCode = 1
-    versionName = "1.0"
+    versionCode = 4
+    versionName = "4.0.0"
 
     // yt-dlp ইঞ্জিনের native ফাইল শুধু arm64 ফোনের জন্য (APK ছোট রাখতে)।
     // ফোন 32-bit হলে এখানে "armeabi-v7a" যোগ করুন (সাইজ দ্বিগুণ হবে)।
@@ -29,11 +29,12 @@ android {
 
   signingConfigs {
     create("release") {
-      val keystorePath = System.getenv("KEYSTORE_PATH") ?: "${rootDir}/my-upload-key.jks"
+      // v3.0.0 এর একই persistent keystore ব্যবহার করা হচ্ছে, যাতে v3 -> v4 আপডেটে uninstall না লাগে
+      val keystorePath = System.getenv("KEYSTORE_PATH") ?: "${rootDir}/debug.keystore"
       storeFile = file(keystorePath)
-      storePassword = System.getenv("STORE_PASSWORD")
-      keyAlias = "upload"
-      keyPassword = System.getenv("KEY_PASSWORD")
+      storePassword = System.getenv("STORE_PASSWORD") ?: "android"
+      keyAlias = System.getenv("KEY_ALIAS") ?: "androiddebugkey"
+      keyPassword = System.getenv("KEY_PASSWORD") ?: "android"
     }
     create("debugConfig") {
       storeFile = file("${rootDir}/debug.keystore")
