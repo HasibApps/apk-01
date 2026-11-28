@@ -7,11 +7,11 @@ HSC Study Reminder & Lecture Tracker (in-app YouTube player + yt-dlp downloader)
 | | |
 |---|---|
 | Package | `com.aistudio.studytracker.kzrm` |
-| Version | 1.0 (versionCode 1) |
+| Version | 6.0.0 (versionCode 6) |
 | ABI | arm64-v8a |
 | Min Android | 7.0 (API 24) |
 | Target SDK | 36 |
-| সাইজ | ~58 MB |
+| Signing | Shared debug keystore (`keystore/debug.keystore.b64`) — আগের ভার্সন আনইনস্টল না করেই আপডেট করা যাবে |
 
 ## GitHub Actions দিয়ে বিল্ড
 
@@ -22,7 +22,7 @@ Actions ট্যাব থেকে ম্যানুয়াল "Run workflo
 2. `debug.keystore` রিস্টোর (বেস64: `keystore/debug.keystore.b64`)
 3. `gradle assembleDebug`
 4. APK যাচাই (badging, ABI, signature)
-5. Artifact আপলোড + GitHub Release `v1.0.0`-এ APK পাবলিশ
+5. Artifact আপলোড + GitHub Release `v6.0.0`-এ APK পাবলিশ
 
 লোকাল বিল্ডের জন্য দেখুন `TERMUX_BUILD.md`।
 

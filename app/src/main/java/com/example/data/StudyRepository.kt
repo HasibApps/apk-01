@@ -100,7 +100,7 @@ class StudyRepository(context: Context) {
                     if (ch.lectures.size > 2) {
                         val extraAreBlank = ch.lectures.drop(2).all { lec ->
                             lec.link.isBlank() && lec.sheetLink.isBlank() &&
-                                    lec.localVideoPath.isBlank() && !lec.completed && !lec.isFavorite &&
+                                    lec.localVideoPath.isBlank() && lec.videoNote.isBlank() && !lec.completed && !lec.isFavorite &&
                                     (lec.title == "লেকচার ${lec.id}" || lec.title == "লেকচার ${StudyUtils.toBengaliDigits(lec.id)}" || lec.title.startsWith("লেকচার"))
                         }
                         if (extraAreBlank) {
@@ -203,6 +203,7 @@ class StudyRepository(context: Context) {
                                         put("completed", lec.completed)
                                         put("isFavorite", lec.isFavorite)
                                         put("lectureTag", lec.lectureTag)
+                                        put("videoNote", lec.videoNote)
                                     }
                                     lecArr.put(lecObj)
                                 }
@@ -262,7 +263,8 @@ class StudyRepository(context: Context) {
                                             localVideoPath = lecObj.optString("localVideoPath", ""),
                                             completed = lecObj.optBoolean("completed", false),
                                             isFavorite = lecObj.optBoolean("isFavorite", false),
-                                            lectureTag = lecObj.optString("lectureTag", "")
+                                            lectureTag = lecObj.optString("lectureTag", ""),
+                                            videoNote = lecObj.optString("videoNote", "")
                                         )
                                     )
                                 }

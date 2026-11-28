@@ -135,30 +135,6 @@ fun HomeScreen(
                     }
                 }
             },
-            navigationIcon = {
-                IconButton(
-                    onClick = onOpenSettings,
-                    modifier = Modifier.testTag("top_settings_button")
-                ) {
-                    Icon(
-                        imageVector = Icons.Default.Settings,
-                        contentDescription = "Settings",
-                        tint = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                }
-            },
-            actions = {
-                IconButton(
-                    onClick = onOpenBackup,
-                    modifier = Modifier.testTag("top_backup_button")
-                ) {
-                    Icon(
-                        imageVector = Icons.Default.Cloud,
-                        contentDescription = "Backup and Sync",
-                        tint = EmeraldBrand
-                    )
-                }
-            },
             colors = TopAppBarDefaults.topAppBarColors(
                 containerColor = MaterialTheme.colorScheme.surface
             ),

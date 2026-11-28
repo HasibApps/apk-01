@@ -1,5 +1,6 @@
 package com.example.ui.components
 
+import android.widget.Toast
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -119,11 +120,11 @@ private fun formatEta(sec: Long): String {
 @Composable
 fun DownloadDialog(
     lecture: Lecture,
+    subjectId: String,
     subjectName: String,
     chapterName: String,
     onDismiss: () -> Unit,
     onPlayOffline: (String) -> Unit,
-    onDownloadCompleted: (filePath: String) -> Unit,
     onDeleteVideo: () -> Unit
 ) {
     val context = LocalContext.current
@@ -145,14 +146,26 @@ fun DownloadDialog(
     var localBusy by remember { mutableStateOf(false) } // Fetch / Update চলার সময়
     var meta by remember { mutableStateOf<VideoMeta?>(null) }
 
-    // ডাউনলোড অ্যাপ-লেভেলে চলে, তাই ডায়ালগ Hide করলেও থামে না
+    // ডাউনলোড অ্যাপ-লেভেলে (Foreground Service) চলে — ডায়ালগ Hide করলে, অন্য পেজে গেলে
+    // বা অ্যাপ থেকে বের হলেও থামে না। একসাথে সর্বোচ্চ ১০টি।
     val tracker by DownloadTracker.state.collectAsState()
-    val downloading = tracker.active && tracker.lectureId == lecture.id
-    val otherDownloading = tracker.active && tracker.lectureId != lecture.id
-    val progress = tracker.progress
-    val busy = localBusy || tracker.active
+    val item = DownloadTracker.itemFor(tracker, subjectId, chapterName, lecture.id)
+    val downloading = item?.active == true
+    val limitReached = !downloading && tracker.activeCount >= DownloadTracker.MAX_DOWNLOADS
+    val progress = item?.progress ?: DlProgress()
+    val busy = localBusy || downloading
     val shownStatus =
-        if (tracker.lectureId == lecture.id && tracker.status.isNotBlank()) tracker.status else status
+        if (item != null && item.status.isNotBlank()) item.status else status
+
+    // এই ডায়ালগ খোলা থাকা অবস্থায় ডাউনলোড সফলভাবে শেষ হলে ডায়ালগ বন্ধ (ফাইল অটো সেভ হয়ে যায়)
+    var sawActive by remember { mutableStateOf(false) }
+    LaunchedEffect(downloading) { if (downloading) sawActive = true }
+    LaunchedEffect(item?.run, item?.success) {
+        if (sawActive && item?.success == true) {
+            DownloadTracker.clearStatus(item.key)
+            onDismiss()
+        }
+    }
 
     // ডাউনলোডার খুললে yt-dlp ইঞ্জিন চালু করা
     LaunchedEffect(showDownloader) {
@@ -189,20 +202,24 @@ fun DownloadDialog(
             status = "আগে ভিডিওর লিঙ্ক দিন"
             return
         }
-        val oldPath = lecture.localVideoPath
-        DownloadTracker.start(
+        val result = DownloadTracker.start(
             context = context,
+            subjectId = subjectId,
+            subjectName = subjectName,
+            chapterName = chapterName,
             lectureId = lecture.id,
+            title = lecture.title,
             url = link,
-            format = format
-        ) { path ->
-            if (oldPath.isNotBlank() && oldPath != path) {
-                VideoDownloader.deleteVideo(oldPath)
-            }
-            // অফলাইনে সেভ → অ্যাপের ভেতরেই লোড/প্লে (ডায়ালগ Hide থাকলেও কাজ করবে)
-            onDownloadCompleted(path)
-            onPlayOffline(path)
-            onDismiss()
+            format = format,
+            oldPath = lecture.localVideoPath
+        )
+        when (result) {
+            DownloadTracker.StartResult.STARTED ->
+                Toast.makeText(context, "ডাউনলোড শুরু হয়েছে — অ্যাপ থেকে বের হলেও চলবে", Toast.LENGTH_SHORT).show()
+            DownloadTracker.StartResult.ALREADY_RUNNING ->
+                Toast.makeText(context, "এই ভিডিও ইতিমধ্যে ডাউনলোড হচ্ছে", Toast.LENGTH_SHORT).show()
+            DownloadTracker.StartResult.LIMIT_REACHED ->
+                Toast.makeText(context, "একসাথে সর্বোচ্চ ${DownloadTracker.MAX_DOWNLOADS}টি ডাউনলোড করা যায়", Toast.LENGTH_SHORT).show()
         }
     }
 
@@ -371,10 +388,15 @@ fun DownloadDialog(
                         }
                         GradBtn(
                             "⬇  Download", PinkGrad, Modifier.fillMaxWidth(),
-                            engineReady && !busy && !otherDownloading && url.isNotBlank()
+                            engineReady && !busy && !limitReached && url.isNotBlank()
                         ) { startDownload() }
-                        if (otherDownloading) {
-                            Text("অন্য একটি ভিডিও ডাউনলোড চলছে…", color = SoftText, fontSize = 12.sp)
+                        if (limitReached) {
+                            Text(
+                                "একসাথে সর্বোচ্চ ${DownloadTracker.MAX_DOWNLOADS}টি ডাউনলোড চলতে পারে — একটি শেষ হলে আবার চেষ্টা করুন",
+                                color = SoftText, fontSize = 12.sp
+                            )
+                        } else if (tracker.activeCount > 0 && !downloading) {
+                            Text("এখন ${tracker.activeCount}টি ডাউনলোড চলছে (ব্যাকগ্রাউন্ডেও চলবে)", color = SoftText, fontSize = 12.sp)
                         }
 
                         // ---------- লাইভ প্রগ্রেস + MB/s স্পিড ----------
@@ -393,7 +415,9 @@ fun DownloadDialog(
                                 horizontalArrangement = Arrangement.SpaceBetween
                             ) {
                                 Text(
-                                    "${(progress.percent * 100).toInt()}%",
+                                    if (progress.totalMB > 0f)
+                                        "${(progress.percent * 100).toInt()}% / ${"%.0f".format(progress.totalMB)} MB"
+                                    else "${(progress.percent * 100).toInt()}%",
                                     color = Color.White, fontWeight = FontWeight.Bold
                                 )
                                 if (progress.processing) {
@@ -418,7 +442,7 @@ fun DownloadDialog(
                                 }
                             }
                             GradBtn("✖ Cancel", PurpleGrad, Modifier.fillMaxWidth()) {
-                                DownloadTracker.cancel()
+                                item?.let { DownloadTracker.cancel(it.key) }
                             }
                         }
                     }

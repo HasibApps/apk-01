@@ -62,21 +62,21 @@ data class DlProgress(
     val speedMBps: Float = 0f,        // MB/s
     val downloadedMB: Float = 0f,     // এখন পর্যন্ত নামানো MB
     val etaSeconds: Long = -1L,
-    val processing: Boolean = false   // ভিডিও+অডিও মার্জ হচ্ছে
+    val processing: Boolean = false,  // ভিডিও+অডিও মার্জ হচ্ছে
+    val totalMB: Float = 0f           // মোট আনুমানিক সাইজ (জানা না থাকলে 0)
 )
 
 class DownloadCancelledException : Exception("Cancelled")
 
 object YtDlpEngine {
-    private const val PROCESS_ID = "study_video_dl"
     private val initMutex = Mutex()
 
     @Volatile
     var isReady: Boolean = false
         private set
 
-    @Volatile
-    private var cancelled = false
+    /** একাধিক ডাউনলোড একসাথে চলে — তাই বাতিলের অবস্থা প্রতিটি processId অনুযায়ী */
+    private val cancelledIds: MutableSet<String> = java.util.concurrent.ConcurrentHashMap.newKeySet()
 
     /** yt-dlp + ffmpeg ইঞ্জিন চালু করে (প্রথমবার কয়েক সেকেন্ড লাগে)। */
     suspend fun ensureInit(context: Context) = withContext(Dispatchers.IO) {
@@ -102,10 +102,10 @@ object YtDlpEngine {
         Unit
     }
 
-    fun cancel() {
-        cancelled = true
+    fun cancel(processId: String) {
+        cancelledIds.add(processId)
         try {
-            YoutubeDL.getInstance().destroyProcessById(PROCESS_ID)
+            YoutubeDL.getInstance().destroyProcessById(processId)
         } catch (_: Throwable) {
         }
     }
@@ -120,13 +120,17 @@ object YtDlpEngine {
         format: DlFormat,
         targetDir: File,
         baseName: String,
+        processId: String,
         onProgress: (DlProgress) -> Unit
     ): File = withContext(Dispatchers.IO) {
         ensureInit(context)
-        cancelled = false
+        if (cancelledIds.contains(processId)) {
+            cancelledIds.remove(processId)
+            throw DownloadCancelledException()
+        }
 
         targetDir.mkdirs()
-        val tmp = File(targetDir, ".tmp_${System.currentTimeMillis()}").apply { mkdirs() }
+        val tmp = File(targetDir, ".tmp_$baseName").apply { mkdirs() }
 
         val lock = Any()
         var phase = 0
@@ -136,6 +140,7 @@ object YtDlpEngine {
         var processing = false
         var parsedSpeed = 0f
         var parsedAt = 0L
+        val phaseTotalsMB = HashMap<Int, Float>()
         var polledSpeed = 0f
         var downloadedBytes = 0L
 
@@ -147,7 +152,8 @@ object YtDlpEngine {
                     speedMBps = if (processing) 0f else if (fresh) parsedSpeed else polledSpeed,
                     downloadedMB = downloadedBytes / (1024f * 1024f),
                     etaSeconds = eta,
-                    processing = processing
+                    processing = processing,
+                    totalMB = phaseTotalsMB.values.sum()
                 )
             }
             onProgress(snap)
@@ -185,7 +191,7 @@ object YtDlpEngine {
                     req.addOption("--no-playlist")
                     req.addOption("-N", "4") // একসাথে ৪টি ফ্র্যাগমেন্ট নামিয়ে স্পিড বাড়ায়
 
-                    YoutubeDL.getInstance().execute(req, PROCESS_ID) { p, etaSec, line ->
+                    YoutubeDL.getInstance().execute(req, processId) { p, etaSec, line ->
                         val l = line ?: ""
                         synchronized(lock) {
                             Regex("""Downloading \d+ format\(s\):\s*(\S+)""").find(l)?.let {
@@ -195,6 +201,7 @@ object YtDlpEngine {
                             if (l.contains("[Merger]") || l.contains("[ExtractAudio]") ||
                                 l.contains("[VideoConvertor]")
                             ) processing = true
+                            parseTotalMB(l)?.let { phaseTotalsMB[maxOf(phase, 1)] = it }
                             parseSpeedMBps(l)?.let {
                                 parsedSpeed = it
                                 parsedAt = SystemClock.elapsedRealtime()
@@ -228,15 +235,27 @@ object YtDlpEngine {
             emit()
             dest
         } catch (e: Throwable) {
-            if (cancelled) throw DownloadCancelledException()
+            if (cancelledIds.contains(processId)) throw DownloadCancelledException()
             throw e
         } finally {
+            cancelledIds.remove(processId)
             tmp.deleteRecursively()
         }
     }
 
     private fun dirSize(dir: File): Long =
         dir.listFiles()?.sumOf { if (it.isFile) it.length() else 0L } ?: 0L
+
+    /** yt-dlp লাইন থেকে "of  480.00MiB" / "of ~ 480.00MiB" অংশ পড়ে MB এ রূপান্তর */
+    private fun parseTotalMB(line: String): Float? {
+        val m = Regex("""of\s+~?\s*([\d.]+)\s*([KMG])i?B""").find(line) ?: return null
+        val n = m.groupValues[1].toFloatOrNull() ?: return null
+        return when (m.groupValues[2]) {
+            "K" -> n / 1024f
+            "G" -> n * 1024f
+            else -> n
+        }
+    }
 
     /** yt-dlp লাইন থেকে "at 2.50MiB/s" অংশ পড়ে MB/s এ রূপান্তর */
     private fun parseSpeedMBps(line: String): Float? {

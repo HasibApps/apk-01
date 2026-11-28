@@ -8,7 +8,9 @@ data class Lecture(
     val localVideoPath: String = "",
     val completed: Boolean = false,
     val isFavorite: Boolean = false,
-    val lectureTag: String = ""
+    val lectureTag: String = "",
+    /** ভিডিও দেখার সময় লেখা নোট (HTML) — টাইমলাইন + টপিক সহ; backup JSON এও যায় */
+    val videoNote: String = ""
 )
 
 data class Chapter(

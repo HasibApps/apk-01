@@ -10,6 +10,8 @@ import com.example.model.Lecture
 import com.example.model.StudyUtils
 import com.example.model.Subject
 import com.example.model.ThemeMode
+import com.example.model.withLocalVideoPath
+import com.example.model.withVideoNote
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -62,6 +64,80 @@ class StudyViewModel(application: Application) : AndroidViewModel(application) {
 
     init {
         loadData()
+        // ব্যাকগ্রাউন্ডে ডাউনলোড শেষ হলে (যেকোনো অধ্যায়/পেজ থেকেই শুরু হোক) সঠিক লেকচারে পাথ সেভ
+        com.example.util.DownloadTracker.completionHandler = { item, path -> onVideoDownloaded(item, path) }
+    }
+
+    override fun onCleared() {
+        com.example.util.DownloadTracker.completionHandler = null
+        super.onCleared()
+    }
+
+    /** ভিডিও নোট সেভ (প্লেয়ারের নোট প্যানেল থেকে) */
+    fun saveVideoNote(subjectId: String, chapterName: String, lectureId: Int, html: String) {
+        val updated = _subjects.value.withVideoNote(subjectId, chapterName, lectureId, html) ?: return
+        _subjects.value = updated
+        repository.saveSubjects(updated)
+        val playing = _activePlayingLecture.value
+        if (playing != null && playing.subjectId == subjectId &&
+            playing.chapterName == chapterName && playing.lecture.id == lectureId
+        ) {
+            _activePlayingLecture.value = playing.copy(lecture = playing.lecture.copy(videoNote = html))
+        }
+    }
+
+    /** সব ডাউনলোড করা ভিডিও (সেটিংস → ডাউনলোড ট্যাব) */
+    fun getAllDownloads(): List<FavoriteItem> {
+        val list = mutableListOf<FavoriteItem>()
+        for (sub in _subjects.value) for (paper in sub.papers) for (chapter in paper.chapters)
+            for (lecture in chapter.lectures) {
+                if (lecture.localVideoPath.isNotBlank() &&
+                    com.example.util.VideoDownloader.isLocalVideoValid(lecture.localVideoPath)
+                ) {
+                    list.add(FavoriteItem(sub.id, sub.name, paper.paperName, chapter.name, lecture))
+                }
+            }
+        return list
+    }
+
+    /** একটি ডাউনলোড মুছে ফেলা (ফাইল + লেকচারের পাথ) */
+    fun deleteDownloadedVideo(subjectId: String, chapterName: String, lectureId: Int) {
+        val lec = _subjects.value.firstOrNull { it.id == subjectId }
+            ?.papers?.flatMap { it.chapters }?.firstOrNull { it.name == chapterName }
+            ?.lectures?.firstOrNull { it.id == lectureId } ?: return
+        com.example.util.VideoDownloader.deleteVideo(lec.localVideoPath)
+        val updated = _subjects.value.withLocalVideoPath(subjectId, chapterName, lectureId, "") ?: return
+        _subjects.value = updated
+        repository.saveSubjects(updated)
+        val playing = _activePlayingLecture.value
+        if (playing != null && playing.subjectId == subjectId &&
+            playing.chapterName == chapterName && playing.lecture.id == lectureId
+        ) {
+            _activePlayingLecture.value = playing.copy(lecture = playing.lecture.copy(localVideoPath = ""))
+        }
+    }
+
+    /** সব ডাউনলোড মুছে ফেলা; কতটি মোছা হলো তা রিটার্ন করে */
+    fun deleteAllDownloadedVideos(): Int {
+        val all = getAllDownloads()
+        all.forEach { deleteDownloadedVideo(it.subjectId, it.chapterName, it.lecture.id) }
+        return all.size
+    }
+
+    private fun onVideoDownloaded(item: com.example.util.DownloadTracker.Item, path: String): Boolean {
+        val updated = _subjects.value.withLocalVideoPath(item.subjectId, item.chapterName, item.lectureId, path)
+            ?: return false
+        _subjects.value = updated
+        repository.saveSubjects(updated)
+
+        // এই লেকচারই এখন চলছে হলে প্লেয়ারও আপডেট
+        val playing = _activePlayingLecture.value
+        if (playing != null && playing.subjectId == item.subjectId &&
+            playing.chapterName == item.chapterName && playing.lecture.id == item.lectureId
+        ) {
+            _activePlayingLecture.value = playing.copy(lecture = playing.lecture.copy(localVideoPath = path))
+        }
+        return true
     }
 
     private fun loadData() {

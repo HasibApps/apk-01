@@ -29,7 +29,10 @@ import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.aspectRatio
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.material.icons.filled.EditNote
+import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
@@ -87,6 +90,9 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.layout.onSizeChanged
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.TransformOrigin
 import androidx.compose.ui.graphics.graphicsLayer
@@ -138,6 +144,7 @@ fun VideoPlayerView(
     onUpdateDownloadedVideo: (filePath: String) -> Unit,
     onSaveDownloadedVideoFor: ((subjectId: String, lectureId: Int, filePath: String) -> Unit)? = null,
     onDeleteDownloadedVideo: () -> Unit,
+    onSaveVideoNote: (html: String) -> Unit = {},
     modifier: Modifier = Modifier
 ) {
     val context = LocalContext.current
@@ -157,6 +164,7 @@ fun VideoPlayerView(
     // Dialog states
     var showDownloadDialog by remember { mutableStateOf(false) }
     val dlState by com.example.util.DownloadTracker.state.collectAsState()
+    val dlItem = com.example.util.DownloadTracker.itemFor(dlState, state.subjectId, state.chapterName, lecture.id)
     var showPasswordDialogForEdit by remember { mutableStateOf(false) }
     var showEditDialog by remember { mutableStateOf(false) }
     var showSheetDialog by remember { mutableStateOf(false) }
@@ -173,18 +181,33 @@ fun VideoPlayerView(
     var customViewCallback by remember { mutableStateOf<WebChromeClient.CustomViewCallback?>(null) }
     var webViewRef by remember { mutableStateOf<WebView?>(null) }
 
-    // Video Lock & 2x Speed state (Screenshot_20261029-080510.jpg)
-    var isVideoLocked by rememberSaveable { mutableStateOf(false) }
-    var is2xSpeed by rememberSaveable { mutableStateOf(false) }
-
-    val applyPlaybackSpeed = remember(webViewRef) {
-        { speed: Double ->
-            webViewRef?.evaluateJavascript(
-                "window.currentPlaybackSpeed = $speed; if (window.setPlaybackSpeed) window.setPlaybackSpeed($speed); else if (player && player.setPlaybackRate) player.setPlaybackRate($speed);",
-                null
-            )
+    // Playback speed (settings menu) + double-tap 2x boost. Owned here so they survive
+    // fullscreen toggles and switching between the offline / YouTube players.
+    var playbackSpeed by rememberSaveable { mutableFloatStateOf(1.0f) }
+    var boost2x by rememberSaveable { mutableStateOf(false) }
+    val toggleFullscreen: () -> Unit = {
+        isAppFullscreen = !isAppFullscreen
+        webViewRef?.evaluateJavascript("if (window.resumePlayback) window.resumePlayback();", null)
+    }
+    // ২x স্পিড: স্ক্রিনের যেকোনো জায়গায় চেপে ধরলে চালু, ছাড়লে বন্ধ
+    var holdBoost by remember { mutableStateOf(false) }
+    // নোট প্যানেল (PDF প্যানেলের পাশের মোড) + নোট/টাইমলাইন থেকে ভিডিও seek
+    var showNotesPanel by rememberSaveable { mutableStateOf(false) }
+    var seekRequest by remember { mutableStateOf<SeekRequest?>(null) }
+    val requestSeek: (Float) -> Unit = { sec ->
+        seekRequest = SeekRequest((sec * 1000f).toLong().coerceAtLeast(0L), System.nanoTime())
+    }
+    // Note icon / স্ক্রিন swipe: প্যানেল (নোট অথবা লেকচার PDF) খোলা/বন্ধ।
+    // PDF লিঙ্ক না থাকলে সরাসরি নোট খোলে।
+    val toggleNotes: () -> Unit = {
+        if (isPdfSplitViewOpen) {
+            isPdfSplitViewOpen = false
+        } else {
+            showNotesPanel = showNotesPanel || lecture.sheetLink.isBlank()
+            isPdfSplitViewOpen = true
         }
     }
+    val openPanelBySwipe: () -> Unit = { if (!isPdfSplitViewOpen) toggleNotes() }
 
     val activity = context as? Activity
 
@@ -233,11 +256,9 @@ fun VideoPlayerView(
         }
     }
 
-    // Handle back button when in fullscreen or when video is locked
-    BackHandler(enabled = isVideoLocked || isAppFullscreen || customFullscreenView != null) {
-        if (isVideoLocked) {
-            isVideoLocked = false
-        } else if (customFullscreenView != null) {
+    // Back button leaves fullscreen first
+    BackHandler(enabled = isAppFullscreen || customFullscreenView != null) {
+        if (customFullscreenView != null) {
             customViewCallback?.onCustomViewHidden()
             customFullscreenView = null
             customViewCallback = null
@@ -286,7 +307,7 @@ fun VideoPlayerView(
 
     val scrollState = rememberScrollState()
 
-    Box(modifier = modifier.fillMaxSize()) {
+    Box(modifier = modifier.fillMaxSize().imePadding()) {
         Column(
             modifier = Modifier
                 .fillMaxSize()
@@ -376,105 +397,76 @@ fun VideoPlayerView(
             }
 
             // =========================================================================
-            // VIDEO VIEWPORT CONTAINER:
-            // When in Fullscreen mode: fills 100% of screen seamlessly without reload
-            // When in Normal mode: 16:9 aspect ratio container
+            // VIDEO VIEWPORT:
+            //  - normal  : 16:9 card
+            //  - fullscreen: video fills the screen; if the Note (PDF) icon is on, the lecture sheet opens
+            //    in a narrow panel on the right while the video keeps playing (same composables, no reload)
             // =========================================================================
-            Box(
-                modifier = if (isAppFullscreen) {
-                    Modifier
-                        .fillMaxSize()
-                        .background(Color.Black)
-                } else {
-                    Modifier
-                        .fillMaxWidth()
-                        .aspectRatio(16f / 9f)
-                        .clip(RoundedCornerShape(16.dp))
-                        .border(1.dp, MaterialTheme.colorScheme.outline.copy(alpha = 0.5f), RoundedCornerShape(16.dp))
-                        .background(Color.Black)
-                },
-                contentAlignment = Alignment.Center
+            Row(
+                modifier = if (isAppFullscreen) Modifier.fillMaxSize().background(Color.Black)
+                else Modifier.fillMaxWidth()
             ) {
-                // Case 1: Playing offline downloaded video with ExoPlayer
-                if (playerType == ActivePlayerType.OFFLINE_EXOPLAYER && isOfflineAvailable) {
-                    ExoPlayerView(
-                        filePath = lecture.localVideoPath ?: "",
-                        modifier = Modifier.fillMaxSize(),
-                        isFullscreen = isAppFullscreen,
-                        externalPlaybackSpeed = if (is2xSpeed) 2.0f else 1.0f,
-                        onToggleFullscreen = {
-                            isAppFullscreen = !isAppFullscreen
-                        },
-                        onFallbackToOnline = {
-                            playerType = ActivePlayerType.YOUTUBE
-                        },
-                        onReDownload = {
-                            showDownloadDialog = true
-                        }
-                    )
-                }
-                // Case 2: Online YouTube Player with timeline preservation
-                else if (!videoId.isNullOrBlank()) {
-                    DisposableEffect(lecture.id) {
-                        onDispose {
-                            webViewRef?.stopLoading()
-                            webViewRef?.destroy()
-                        }
+                Box(
+                    modifier = (if (isAppFullscreen) {
+                        Modifier
+                            .weight(if (isPdfSplitViewOpen) 0.62f else 1f)
+                            .fillMaxHeight()
+                    } else {
+                        Modifier
+                            .weight(1f)
+                            .aspectRatio(16f / 9f)
+                            .clip(RoundedCornerShape(16.dp))
+                            .border(1.dp, MaterialTheme.colorScheme.outline.copy(alpha = 0.5f), RoundedCornerShape(16.dp))
+                    }).background(Color.Black),
+                    contentAlignment = Alignment.Center
+                ) {
+                    // Case 1: offline downloaded video (ExoPlayer + custom controls)
+                    if (playerType == ActivePlayerType.OFFLINE_EXOPLAYER && isOfflineAvailable) {
+                        ExoPlayerView(
+                            filePath = lecture.localVideoPath ?: "",
+                            modifier = Modifier.fillMaxSize(),
+                            isFullscreen = isAppFullscreen,
+                            playbackSpeed = playbackSpeed,
+                            boost2x = boost2x,
+                            onSpeedSelected = { playbackSpeed = it; boost2x = false },
+                            onToggleBoost = { boost2x = !boost2x },
+                            holdBoost = holdBoost,
+                            onHoldBoost = { holdBoost = it },
+                            onSwipeLeft = openPanelBySwipe,
+                            externalSeek = seekRequest,
+                            onTimeUpdate = { currentPlaybackSeconds = it },
+                            isNotesOpen = isPdfSplitViewOpen,
+                            onToggleNotes = toggleNotes,
+                            onToggleFullscreen = toggleFullscreen,
+                            onFallbackToOnline = { playerType = ActivePlayerType.YOUTUBE },
+                            onReDownload = { showDownloadDialog = true }
+                        )
                     }
-
-                    AndroidView(
-                        factory = { ctx ->
-                            WebView(ctx).apply {
-                                layoutParams = ViewGroup.LayoutParams(
-                                    ViewGroup.LayoutParams.MATCH_PARENT,
-                                    ViewGroup.LayoutParams.MATCH_PARENT
-                                )
-                                settings.apply {
-                                    javaScriptEnabled = true
-                                    domStorageEnabled = true
-                                    mediaPlaybackRequiresUserGesture = false
-                                    allowFileAccess = true
-                                    databaseEnabled = true
-                                    loadWithOverviewMode = true
-                                    useWideViewPort = true
-                                    cacheMode = WebSettings.LOAD_DEFAULT
-                                }
-
-                                addJavascriptInterface(
-                                    YouTubeBridge { seconds ->
-                                        currentPlaybackSeconds = seconds
-                                    },
-                                    "AndroidBridge"
-                                )
-
-                                webChromeClient = object : WebChromeClient() {
-                                    override fun onShowCustomView(view: View, callback: CustomViewCallback) {
-                                        customFullscreenView = view
-                                        customViewCallback = callback
-                                        activity?.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
-                                        webViewRef?.evaluateJavascript("if (window.resumePlayback) window.resumePlayback(); else if (player && player.playVideo) player.playVideo();", null)
-                                    }
-
-                                    override fun onHideCustomView() {
-                                        customViewCallback?.onCustomViewHidden()
-                                        customFullscreenView = null
-                                        customViewCallback = null
-                                        activity?.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED
-                                        webViewRef?.evaluateJavascript("if (window.resumePlayback) window.resumePlayback(); else if (player && player.playVideo) player.playVideo();", null)
-                                    }
-                                }
-
-                                webViewClient = object : WebViewClient() {
-                                    override fun shouldOverrideUrlLoading(view: WebView?, url: String?): Boolean = false
-                                }
-                                setBackgroundColor(0xFF000000.toInt())
-                                val html = getYouTubeIFrameHtml(videoId, currentPlaybackSeconds.toInt())
-                                loadDataWithBaseURL("https://www.youtube-nocookie.com", html, "text/html", "UTF-8", null)
-                                webViewRef = this
+                    // Case 2: YouTube (iframe, controls=0 + the same custom controls)
+                    else if (!videoId.isNullOrBlank()) {
+                        YouTubeCustomPlayer(
+                            videoId = videoId,
+                            startSeconds = currentPlaybackSeconds.toInt(),
+                            modifier = Modifier.fillMaxSize(),
+                            isFullscreen = isAppFullscreen,
+                            playbackSpeed = playbackSpeed,
+                            boost2x = boost2x,
+                            onSpeedSelected = { playbackSpeed = it; boost2x = false },
+                            onToggleBoost = { boost2x = !boost2x },
+                            holdBoost = holdBoost,
+                            onHoldBoost = { holdBoost = it },
+                            onSwipeLeft = openPanelBySwipe,
+                            externalSeek = seekRequest,
+                            isNotesOpen = isPdfSplitViewOpen,
+                            onToggleNotes = toggleNotes,
+                            onToggleFullscreen = toggleFullscreen,
+                            onTimeUpdate = { currentPlaybackSeconds = it },
+                            onWebViewReady = { webViewRef = it },
+                            onCustomView = { view, cb ->
+                                customFullscreenView = view
+                                customViewCallback = cb
                             }
-                        },
-                        modifier = Modifier.fillMaxSize()
-                    )
+                        )
                 } else if (lecture.link.isNotBlank()) {
                     AndroidView(
                         factory = { ctx ->
@@ -527,128 +519,24 @@ fun VideoPlayerView(
                         }
                     }
                 }
-
-                // =========================================================================
-                // VIDEO LOCK TOUCH SHIELD:
-                // When locked, blocks all accidental touches, scrub gestures, pauses on the video!
-                // =========================================================================
-                if (isVideoLocked) {
-                    Box(
-                        modifier = Modifier
-                            .fillMaxSize()
-                            .background(Color.Transparent)
-                            .clickable(
-                                interactionSource = remember { MutableInteractionSource() },
-                                indication = null
-                            ) {
-                                // (message removed) – touches are simply blocked while locked
-                            }
-                            .zIndex(10f)
-                    )
                 }
 
-                // =========================================================================
-                // VIDEO CONTROL BAR:
-                // [ (2x) (ONLY when locked!) ]  [ Lock/Unlock Icon ]  [ Fullscreen Icon ]
-                // =========================================================================
-                Row(
-                    modifier = Modifier
-                        .align(if (isAppFullscreen) Alignment.TopEnd else Alignment.BottomEnd)
-                        .padding(
-                            start = 10.dp, top = 10.dp, end = 10.dp,
-                            bottom = if (!isAppFullscreen && playerType == ActivePlayerType.OFFLINE_EXOPLAYER && isOfflineAvailable) 44.dp else 10.dp
-                        )
-                        .zIndex(20f),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(8.dp)
-                ) {
-                    // (2x) Button: MUST ONLY appear after Lock is activated (Screenshot_20261029-080510.jpg)
-                    if (isVideoLocked) {
-                        Surface(
-                            shape = RoundedCornerShape(16.dp),
-                            color = if (is2xSpeed) Color(0xFFF59E0B) else Color.Black.copy(alpha = 0.75f),
-                            border = BorderStroke(
-                                1.dp,
-                                if (is2xSpeed) Color(0xFFFBBF24) else Color.White.copy(alpha = 0.7f)
-                            ),
-                            modifier = Modifier
-                                .height(36.dp)
-                                .clickable {
-                                    is2xSpeed = !is2xSpeed
-                                    val rate = if (is2xSpeed) 2.0 else 1.0
-                                    applyPlaybackSpeed(rate)
-                                    Toast.makeText(
-                                        context,
-                                        if (is2xSpeed) "ভিডিও 2x স্পিডে চলছে ⚡" else "স্বাভাবিক স্পিড (1x)",
-                                        Toast.LENGTH_SHORT
-                                    ).show()
-                                }
-                                .testTag("video_2x_speed_btn")
-                        ) {
-                            Row(
-                                modifier = Modifier.padding(horizontal = 10.dp),
-                                verticalAlignment = Alignment.CenterVertically,
-                                horizontalArrangement = Arrangement.Center
-                            ) {
-                                Text(
-                                    text = "2x",
-                                    color = if (is2xSpeed) Color.Black else Color.White,
-                                    fontSize = 13.sp,
-                                    fontWeight = FontWeight.ExtraBold
-                                )
-                            }
-                        }
-                    }
-
-                    // Lock Icon Button (locks video like dedicated video player app)
-                    IconButton(
-                        onClick = {
-                            isVideoLocked = !isVideoLocked
-                        },
+                // Fullscreen + Note icon  =>  video (left) | lecture sheet PDF (right)
+                if (isAppFullscreen && isPdfSplitViewOpen) {
+                    PlayerSidePanel(
+                        state = state,
+                        showNotes = showNotesPanel,
+                        onShowNotes = { showNotesPanel = it },
+                        currentSeconds = { currentPlaybackSeconds },
+                        onSeek = requestSeek,
+                        onSaveNote = onSaveVideoNote,
+                        onOpenInBrowser = { openUrlInBrowser(context, lecture.sheetLink) },
+                        onClose = { isPdfSplitViewOpen = false },
                         modifier = Modifier
-                            .size(36.dp)
-                            .background(
-                                if (isVideoLocked) Color(0xFFEF4444).copy(alpha = 0.9f)
-                                else Color.Black.copy(alpha = 0.65f),
-                                CircleShape
-                            )
-                            .border(
-                                if (isVideoLocked) BorderStroke(1.5.dp, Color(0xFFFCA5A5))
-                                else BorderStroke(0.dp, Color.Transparent),
-                                CircleShape
-                            )
-                            .testTag("video_lock_toggle_btn")
-                    ) {
-                        Icon(
-                            imageVector = if (isVideoLocked) Icons.Default.Lock else Icons.Default.LockOpen,
-                            contentDescription = if (isVideoLocked) "Unlock Video" else "Lock Video",
-                            tint = Color.White,
-                            modifier = Modifier.size(19.dp)
-                        )
-                    }
-
-                    // Fullscreen Toggle Button
-                    IconButton(
-                        onClick = {
-                            if (!isVideoLocked) {
-                                isAppFullscreen = !isAppFullscreen
-                                webViewRef?.evaluateJavascript("if (window.resumePlayback) window.resumePlayback(); else if (player && player.playVideo) player.playVideo();", null)
-                            } else {
-                                Toast.makeText(context, "ফুলস্ক্রিন পরিবর্তন করতে প্রথমে ভিডিও আনলক করুন", Toast.LENGTH_SHORT).show()
-                            }
-                        },
-                        modifier = Modifier
-                            .size(36.dp)
-                            .background(Color.Black.copy(alpha = 0.65f), CircleShape)
-                            .testTag("video_fullscreen_toggle_btn")
-                    ) {
-                        Icon(
-                            imageVector = if (isAppFullscreen) Icons.Default.FullscreenExit else Icons.Default.Fullscreen,
-                            contentDescription = if (isAppFullscreen) "Exit Fullscreen" else "Full Screen",
-                            tint = Color.White,
-                            modifier = Modifier.size(20.dp)
-                        )
-                    }
+                            .weight(0.38f)
+                            .fillMaxHeight()
+                            .padding(6.dp)
+                    )
                 }
             }
 
@@ -669,8 +557,11 @@ fun VideoPlayerView(
                         onClick = {
                             if (lecture.sheetLink.isBlank()) {
                                 showSheetDialog = true
+                            } else if (isPdfSplitViewOpen && !showNotesPanel) {
+                                isPdfSplitViewOpen = false
                             } else {
-                                isPdfSplitViewOpen = !isPdfSplitViewOpen
+                                showNotesPanel = false
+                                isPdfSplitViewOpen = true
                             }
                         },
                         shape = RoundedCornerShape(22.dp),
@@ -695,7 +586,47 @@ fun VideoPlayerView(
                         )
                         Spacer(modifier = Modifier.width(4.dp))
                         Text(
-                            text = if (isPdfSplitViewOpen) "Hide Pdf" else "Open Pdf",
+                            text = if (isPdfSplitViewOpen && !showNotesPanel) "Hide Pdf" else "Open Pdf",
+                            fontSize = 12.sp,
+                            fontWeight = FontWeight.Bold,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                    }
+
+                    // Notes button (ভিডিও টাইমলাইন নোট)
+                    OutlinedButton(
+                        onClick = {
+                            if (isPdfSplitViewOpen && showNotesPanel) {
+                                isPdfSplitViewOpen = false
+                            } else {
+                                showNotesPanel = true
+                                isPdfSplitViewOpen = true
+                            }
+                        },
+                        shape = RoundedCornerShape(22.dp),
+                        colors = ButtonDefaults.outlinedButtonColors(
+                            containerColor = if (isPdfSplitViewOpen && showNotesPanel) Color(0xFFF59E0B).copy(alpha = 0.15f) else MaterialTheme.colorScheme.surface,
+                            contentColor = if (isPdfSplitViewOpen && showNotesPanel) Color(0xFFF59E0B) else MaterialTheme.colorScheme.onSurface
+                        ),
+                        border = BorderStroke(
+                            1.dp,
+                            if (isPdfSplitViewOpen && showNotesPanel) Color(0xFFF59E0B) else MaterialTheme.colorScheme.outline.copy(alpha = 0.5f)
+                        ),
+                        modifier = Modifier
+                            .weight(1f)
+                            .height(44.dp)
+                            .testTag("open_notes_button")
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.EditNote,
+                            contentDescription = null,
+                            tint = Color(0xFFF59E0B),
+                            modifier = Modifier.size(16.dp)
+                        )
+                        Spacer(modifier = Modifier.width(4.dp))
+                        Text(
+                            text = "Notes",
                             fontSize = 12.sp,
                             fontWeight = FontWeight.Bold,
                             maxLines = 1,
@@ -728,8 +659,8 @@ fun VideoPlayerView(
                         )
                         Spacer(modifier = Modifier.width(4.dp))
                         Text(
-                            text = if (dlState.active && dlState.lectureId == lecture.id)
-                                "${(dlState.progress.percent * 100).toInt()}%"
+                            text = if (dlItem?.active == true)
+                                "${((dlItem?.progress?.percent ?: 0f) * 100).toInt()}%"
                             else if (isOfflineAvailable) "Downloaded" else "Download",
                             fontSize = 12.sp,
                             fontWeight = FontWeight.Bold,
@@ -769,7 +700,7 @@ fun VideoPlayerView(
                 }
 
                 // Hide করা অবস্থায় চলমান ডাউনলোডের % ও স্পিড
-                if (!showDownloadDialog && dlState.active && dlState.lectureId == lecture.id) {
+                if (!showDownloadDialog && dlItem?.active == true) {
                     Spacer(modifier = Modifier.height(10.dp))
                     Surface(
                         shape = RoundedCornerShape(14.dp),
@@ -784,14 +715,14 @@ fun VideoPlayerView(
                                 horizontalArrangement = Arrangement.SpaceBetween
                             ) {
                                 Text(
-                                    text = if (dlState.progress.processing) "⚙ প্রসেস হচ্ছে…"
-                                    else "⬇ ডাউনলোড হচ্ছে ${(dlState.progress.percent * 100).toInt()}%",
+                                    text = if ((dlItem?.progress?.processing == true)) "⚙ প্রসেস হচ্ছে…"
+                                    else "⬇ ডাউনলোড হচ্ছে ${((dlItem?.progress?.percent ?: 0f) * 100).toInt()}%",
                                     fontSize = 12.sp,
                                     fontWeight = FontWeight.Bold,
                                     color = Color(0xFF10B981)
                                 )
                                 Text(
-                                    text = "⚡ ${"%.2f".format(dlState.progress.speedMBps)} MB/s",
+                                    text = "⚡ ${"%.2f".format((dlItem?.progress?.speedMBps ?: 0f))} MB/s",
                                     fontSize = 12.sp,
                                     fontWeight = FontWeight.Bold,
                                     color = Color(0xFF10B981)
@@ -799,7 +730,7 @@ fun VideoPlayerView(
                             }
                             Spacer(modifier = Modifier.height(6.dp))
                             androidx.compose.material3.LinearProgressIndicator(
-                                progress = { dlState.progress.percent },
+                                progress = { (dlItem?.progress?.percent ?: 0f) },
                                 modifier = Modifier
                                     .fillMaxWidth()
                                     .height(6.dp)
@@ -865,12 +796,15 @@ fun VideoPlayerView(
                     Spacer(modifier = Modifier.height(8.dp))
 
                     // Embedded In-App PDF Slides Viewer Container with Download & Offline support
-                    InAppPdfSlidesViewer(
-                        subjectId = state.subjectId,
-                        lectureId = lecture.id,
-                        sheetUrl = lecture.sheetLink,
+                    PlayerSidePanel(
+                        state = state,
+                        showNotes = showNotesPanel,
+                        onShowNotes = { showNotesPanel = it },
+                        currentSeconds = { currentPlaybackSeconds },
+                        onSeek = requestSeek,
+                        onSaveNote = onSaveVideoNote,
                         onOpenInBrowser = { openUrlInBrowser(context, lecture.sheetLink) },
-                        onClosePdf = { isPdfSplitViewOpen = false },
+                        onClose = { isPdfSplitViewOpen = false },
                         modifier = Modifier
                             .fillMaxWidth()
                             .height(480.dp)
@@ -1002,20 +936,13 @@ fun VideoPlayerView(
 
     // Download Dialog
     if (showDownloadDialog) {
-        val dlSubjectId = state.subjectId
-        val dlLectureId = lecture.id
         DownloadDialog(
             lecture = lecture,
+            subjectId = state.subjectId,
             subjectName = state.subjectName,
             chapterName = state.chapterName,
             onDismiss = { showDownloadDialog = false },
             onPlayOffline = {
-                playerType = ActivePlayerType.OFFLINE_EXOPLAYER
-            },
-            onDownloadCompleted = { path ->
-                // Hide করা অবস্থায় বা অন্য ক্লাসে গেলেও সঠিক লেকচারেই সেভ হবে
-                val saver = onSaveDownloadedVideoFor
-                if (saver != null) saver(dlSubjectId, dlLectureId, path) else onUpdateDownloadedVideo(path)
                 playerType = ActivePlayerType.OFFLINE_EXOPLAYER
             },
             onDeleteVideo = {
@@ -1168,6 +1095,7 @@ fun VideoPlayerView(
                                 onUpdateLecture(lecture.title, lecture.link, inputSheetLink)
                                 showSheetDialog = false
                                 if (inputSheetLink.isNotBlank()) {
+                                    showNotesPanel = false
                                     isPdfSplitViewOpen = true
                                 }
                             },
@@ -1194,14 +1122,20 @@ fun InAppPdfSlidesViewer(
     sheetUrl: String,
     onOpenInBrowser: () -> Unit,
     onClosePdf: () -> Unit,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    onOpenNotes: (() -> Unit)? = null
 ) {
     val context = LocalContext.current
     val coroutineScope = rememberCoroutineScope()
     val previewUrl = remember(sheetUrl) { StudyUtils.formatDrivePreviewUrl(sheetUrl) }
     var webViewRef by remember { mutableStateOf<WebView?>(null) }
     var isLoading by remember { mutableStateOf(true) }
-    var zoomScale by remember { mutableFloatStateOf(1.0f) }
+    var zoomScale by remember { mutableFloatStateOf(PDF_MIN_ZOOM) }
+    // অনলাইন (WebView) ভিউয়ারের pinch-zoom এর pan অফসেট
+    var webPanX by remember { mutableFloatStateOf(0f) }
+    var webPanY by remember { mutableFloatStateOf(0f) }
+    var webBoxW by remember { mutableFloatStateOf(0f) }
+    var webBoxH by remember { mutableFloatStateOf(0f) }
 
     // Offline PDF State
     var isDownloadingPdf by remember { mutableStateOf(false) }
@@ -1248,14 +1182,9 @@ fun InAppPdfSlidesViewer(
                 // Zoom Out (-)
                 IconButton(
                     onClick = {
-                        zoomScale = (zoomScale - 0.25f).coerceAtLeast(0.6f)
-                        try {
-                            webViewRef?.zoomOut()
-                            webViewRef?.evaluateJavascript(
-                                "document.body.style.zoom = '$zoomScale';",
-                                null
-                            )
-                        } catch (_: Exception) {}
+                        // ১০০% এর নিচে zoom-out করা যাবে না
+                        zoomScale = (zoomScale - 0.25f).coerceAtLeast(PDF_MIN_ZOOM)
+                        if (zoomScale <= PDF_MIN_ZOOM) { webPanX = 0f; webPanY = 0f }
                     },
                     modifier = Modifier.size(28.dp)
                 ) {
@@ -1270,14 +1199,7 @@ fun InAppPdfSlidesViewer(
                 // Zoom In (+)
                 IconButton(
                     onClick = {
-                        zoomScale = (zoomScale + 0.25f).coerceAtMost(3.5f)
-                        try {
-                            webViewRef?.zoomIn()
-                            webViewRef?.evaluateJavascript(
-                                "document.body.style.zoom = '$zoomScale';",
-                                null
-                            )
-                        } catch (_: Exception) {}
+                        zoomScale = (zoomScale + 0.25f).coerceAtMost(PDF_MAX_ZOOM)
                     },
                     modifier = Modifier.size(28.dp)
                 ) {
@@ -1368,6 +1290,21 @@ fun InAppPdfSlidesViewer(
                     )
                 }
 
+                // Note icon (×-এর পাশে): নোট প্যানেলে যাওয়া
+                if (onOpenNotes != null) {
+                    IconButton(
+                        onClick = onOpenNotes,
+                        modifier = Modifier.size(28.dp)
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.EditNote,
+                            contentDescription = "Notes",
+                            tint = Color(0xFFFBBF24),
+                            modifier = Modifier.size(18.dp)
+                        )
+                    }
+                }
+
                 // Close PDF
                 IconButton(
                     onClick = onClosePdf,
@@ -1421,6 +1358,7 @@ fun InAppPdfSlidesViewer(
                 NativePdfRendererView(
                     pdfFile = offlinePdfFile,
                     zoomScale = zoomScale,
+                    onZoomChange = { zoomScale = it },
                     modifier = Modifier.fillMaxSize()
                 )
             } else {
@@ -1428,10 +1366,31 @@ fun InAppPdfSlidesViewer(
                 Box(
                     modifier = Modifier
                         .fillMaxSize()
+                        .clipToBounds()
+                        .onSizeChanged { webBoxW = it.width.toFloat(); webBoxH = it.height.toFloat() }
+                        // ২ আঙুলে pinch zoom (অনলাইন) — সর্বনিম্ন ১০০%
+                        .pointerInput(Unit) {
+                            detectPdfPinch(
+                                onGesture = { centroid, pan, zoomChange ->
+                                    val old = zoomScale
+                                    val new = (old * zoomChange).coerceIn(PDF_MIN_ZOOM, PDF_MAX_ZOOM)
+                                    val f = new / old
+                                    val minX = -(webBoxW * (new - 1f))
+                                    val minY = -(webBoxH * (new - 1f))
+                                    webPanX = ((webPanX - centroid.x) * f + centroid.x + pan.x)
+                                        .coerceIn(minX.coerceAtMost(0f), 0f)
+                                    webPanY = ((webPanY - centroid.y) * f + centroid.y + pan.y)
+                                        .coerceIn(minY.coerceAtMost(0f), 0f)
+                                    zoomScale = new
+                                }
+                            )
+                        }
                         .graphicsLayer {
                             scaleX = zoomScale
                             scaleY = zoomScale
-                            transformOrigin = TransformOrigin(0.5f, 0f)
+                            translationX = webPanX
+                            translationY = webPanY
+                            transformOrigin = TransformOrigin(0f, 0f)
                         },
                     contentAlignment = Alignment.Center
                 ) {
@@ -1465,9 +1424,9 @@ fun InAppPdfSlidesViewer(
                                     domStorageEnabled = true
                                     loadWithOverviewMode = true
                                     useWideViewPort = true
-                                    builtInZoomControls = true
+                                    builtInZoomControls = false
                                     displayZoomControls = false
-                                    setSupportZoom(true)
+                                    setSupportZoom(false)
                                     allowFileAccess = true
                                     databaseEnabled = true
                                     userAgentString = "Mozilla/5.0 (Linux; Android 13; Mobile) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36"
@@ -1564,135 +1523,6 @@ fun InAppPdfSlidesViewer(
     }
 }
 
-private fun getYouTubeIFrameHtml(videoId: String, startTimeSeconds: Int = 0): String {
-    val startParam = if (startTimeSeconds > 0) "&start=$startTimeSeconds" else ""
-    return """
-        <!DOCTYPE html>
-        <html>
-        <head>
-            <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-            <style>
-                * { margin: 0; padding: 0; box-sizing: border-box; background: #000; }
-                html, body { width: 100%; height: 100%; overflow: hidden; background: #000; }
-                .container { position: relative; width: 100%; height: 100%; display: flex; align-items: center; justify-content: center; }
-                iframe { width: 100%; height: 100%; border: 0; }
-            </style>
-        </head>
-        <body>
-            <div class="container">
-                <div id="player"></div>
-            </div>
-            <script>
-                var tag = document.createElement('script');
-                tag.src = "https://www.youtube.com/iframe_api";
-                var firstScriptTag = document.getElementsByTagName('script')[0];
-                firstScriptTag.parentNode.insertBefore(tag, firstScriptTag);
-
-                var player;
-                var isPlaying = false;
-                var userExplicitlyPaused = false;
-                window.currentPlaybackSpeed = 1.0;
-
-                window.setPlaybackSpeed = function(rate) {
-                    try {
-                        window.currentPlaybackSpeed = rate;
-                        if (player && typeof player.setPlaybackRate === 'function') {
-                            player.setPlaybackRate(rate);
-                        }
-                    } catch(e) {}
-                };
-
-                function onYouTubeIframeAPIReady() {
-                    player = new YT.Player('player', {
-                        height: '100%',
-                        width: '100%',
-                        videoId: '$videoId',
-                        playerVars: {
-                            'autoplay': 1,
-                            'playsinline': 1,
-                            'rel': 0,
-                            'modestbranding': 1,
-                            'controls': 1,
-                            'fs': 1,
-                            'enablejsapi': 1$startParam
-                        },
-                        events: {
-                            'onReady': onPlayerReady,
-                            'onStateChange': onPlayerStateChange
-                        }
-                    });
-                }
-
-                function onPlayerStateChange(event) {
-                    if (event.data === YT.PlayerState.PLAYING) {
-                        isPlaying = true;
-                        userExplicitlyPaused = false;
-                        if (window.currentPlaybackSpeed && window.currentPlaybackSpeed !== 1.0) {
-                            try { player.setPlaybackRate(window.currentPlaybackSpeed); } catch(e) {}
-                        }
-                    } else if (event.data === YT.PlayerState.PAUSED) {
-                        isPlaying = false;
-                    } else if (event.data === YT.PlayerState.ENDED) {
-                        isPlaying = false;
-                        userExplicitlyPaused = true;
-                    }
-                }
-
-                window.resumePlayback = function() {
-                    try {
-                        if (player && typeof player.playVideo === 'function' && !userExplicitlyPaused) {
-                            player.playVideo();
-                        }
-                        if (window.currentPlaybackSpeed && window.currentPlaybackSpeed !== 1.0) {
-                            player.setPlaybackRate(window.currentPlaybackSpeed);
-                        }
-                    } catch(e) {}
-                };
-
-                function onPlayerReady(event) {
-                    try {
-                        event.target.playVideo();
-                        if (window.currentPlaybackSpeed && window.currentPlaybackSpeed !== 1.0) {
-                            event.target.setPlaybackRate(window.currentPlaybackSpeed);
-                        }
-                    } catch(e) {}
-                    setInterval(function() {
-                        try {
-                            if (player && player.getCurrentTime && window.AndroidBridge) {
-                                window.AndroidBridge.sendCurrentTime(player.getCurrentTime());
-                            }
-                        } catch(e) {}
-                    }, 500);
-                }
-
-                // Prevent pausing or stopping when resizing / rotating / fullscreen transition occurs
-                window.addEventListener('resize', function() {
-                    if (isPlaying && !userExplicitlyPaused) {
-                        setTimeout(window.resumePlayback, 100);
-                        setTimeout(window.resumePlayback, 300);
-                        setTimeout(window.resumePlayback, 600);
-                    }
-                });
-
-                document.addEventListener('fullscreenchange', function() {
-                    if (isPlaying && !userExplicitlyPaused) {
-                        setTimeout(window.resumePlayback, 100);
-                        setTimeout(window.resumePlayback, 350);
-                    }
-                });
-
-                document.addEventListener('webkitfullscreenchange', function() {
-                    if (isPlaying && !userExplicitlyPaused) {
-                        setTimeout(window.resumePlayback, 100);
-                        setTimeout(window.resumePlayback, 350);
-                    }
-                });
-            </script>
-        </body>
-        </html>
-    """.trimIndent()
-}
-
 private fun openUrlInBrowser(context: Context, url: String) {
     if (url.isBlank()) return
     try {
@@ -1705,5 +1535,47 @@ private fun openUrlInBrowser(context: Context, url: String) {
         context.startActivity(intent)
     } catch (e: Exception) {
         e.printStackTrace()
+    }
+}
+
+
+/** নোট/টাইমলাইন থেকে ভিডিও seek অনুরোধ (nonce বদলালে নতুন অনুরোধ) */
+data class SeekRequest(val ms: Long, val nonce: Long)
+
+/** ডান/নিচের সাইড প্যানেল: লেকচার PDF অথবা ভিডিও নোট — উপরের নোট/PDF আইকনে মোড বদলায় */
+@Composable
+private fun PlayerSidePanel(
+    state: PlayingLectureState,
+    showNotes: Boolean,
+    onShowNotes: (Boolean) -> Unit,
+    currentSeconds: () -> Float,
+    onSeek: (Float) -> Unit,
+    onSaveNote: (String) -> Unit,
+    onOpenInBrowser: () -> Unit,
+    onClose: () -> Unit,
+    modifier: Modifier = Modifier
+) {
+    val lecture = state.lecture
+    if (showNotes) {
+        VideoNotesPanel(
+            lectureKey = "${state.subjectId}|${state.chapterName}|${lecture.id}",
+            initialHtml = lecture.videoNote,
+            currentSeconds = currentSeconds,
+            onSeek = onSeek,
+            onNoteChanged = onSaveNote,
+            onShowPdf = if (lecture.sheetLink.isNotBlank()) ({ onShowNotes(false) }) else null,
+            onClose = onClose,
+            modifier = modifier
+        )
+    } else {
+        InAppPdfSlidesViewer(
+            subjectId = state.subjectId,
+            lectureId = lecture.id,
+            sheetUrl = lecture.sheetLink,
+            onOpenInBrowser = onOpenInBrowser,
+            onClosePdf = onClose,
+            modifier = modifier,
+            onOpenNotes = { onShowNotes(true) }
+        )
     }
 }

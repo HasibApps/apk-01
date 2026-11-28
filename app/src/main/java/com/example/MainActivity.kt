@@ -1,6 +1,11 @@
 package com.example
 
+import android.Manifest
+import android.content.pm.PackageManager
+import android.os.Build
 import android.os.Bundle
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.core.content.ContextCompat
 import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
@@ -29,7 +34,9 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import com.example.model.ThemeMode
 import com.example.ui.StudyViewModel
+import com.example.ui.components.AppBottomBar
 import com.example.ui.components.BackupDialog
+import com.example.ui.components.BottomMenu
 import com.example.ui.components.SettingsDialog
 import com.example.ui.components.VideoPlayerView
 import com.example.ui.screens.DetailedAnalyticsScreen
@@ -43,6 +50,7 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
+        requestNeededPermissions()
 
         setContent {
             val themeMode by viewModel.themeMode.collectAsState()
@@ -56,6 +64,21 @@ class MainActivity : ComponentActivity() {
                 StudyTrackerApp(viewModel = viewModel)
             }
         }
+    }
+
+    private val permissionLauncher =
+        registerForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { }
+
+    /** ডাউনলোড নোটিফিকেশন (Android 13+) ও PDF পৃষ্ঠা সেভ (Android 9 ও নিচে) এর অনুমতি */
+    private fun requestNeededPermissions() {
+        val needed = mutableListOf<String>()
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
+            ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
+        ) needed.add(Manifest.permission.POST_NOTIFICATIONS)
+        if (Build.VERSION.SDK_INT <= Build.VERSION_CODES.P &&
+            ContextCompat.checkSelfPermission(this, Manifest.permission.WRITE_EXTERNAL_STORAGE) != PackageManager.PERMISSION_GRANTED
+        ) needed.add(Manifest.permission.WRITE_EXTERNAL_STORAGE)
+        if (needed.isNotEmpty()) permissionLauncher.launch(needed.toTypedArray())
     }
 }
 
@@ -73,6 +96,7 @@ fun StudyTrackerApp(viewModel: StudyViewModel) {
     var showBackupDialog by remember { mutableStateOf(false) }
     var showSplashScreen by remember { mutableStateOf(true) }
     var showDetailedAnalytics by remember { mutableStateOf(false) }
+    var settingsInitialTab by remember { mutableStateOf(0) }
 
     LaunchedEffect(Unit) {
         kotlinx.coroutines.delay(1200)
@@ -102,7 +126,31 @@ fun StudyTrackerApp(viewModel: StudyViewModel) {
     val activeSubject = subjects.firstOrNull { it.id == activeSubjectId }
 
     androidx.compose.foundation.layout.Box(modifier = Modifier.fillMaxSize()) {
-        Scaffold(modifier = Modifier.fillMaxSize()) { innerPadding ->
+        val onHome = !showDetailedAnalytics && activePlayingLecture == null && activeSubject == null
+        Scaffold(
+            modifier = Modifier.fillMaxSize(),
+            bottomBar = {
+                if (onHome) {
+                    AppBottomBar(
+                        selected = when {
+                            showSettingsDialog && settingsInitialTab == 1 -> BottomMenu.DOWNLOADS
+                            showSettingsDialog -> BottomMenu.SETTINGS
+                            showBackupDialog -> BottomMenu.BACKUP
+                            else -> BottomMenu.HOME
+                        },
+                        onSelect = { menu ->
+                            when (menu) {
+                                BottomMenu.HOME -> { showSettingsDialog = false; showBackupDialog = false }
+                                BottomMenu.PROGRESS -> showDetailedAnalytics = true
+                                BottomMenu.DOWNLOADS -> { settingsInitialTab = 1; showBackupDialog = false; showSettingsDialog = true }
+                                BottomMenu.BACKUP -> { showSettingsDialog = false; showBackupDialog = true }
+                                BottomMenu.SETTINGS -> { settingsInitialTab = 0; showBackupDialog = false; showSettingsDialog = true }
+                            }
+                        }
+                    )
+                }
+            }
+        ) { innerPadding ->
             when {
                 // Screen 0: Detailed Analytics View (Requirement 2)
                 showDetailedAnalytics -> {
@@ -150,6 +198,10 @@ fun StudyTrackerApp(viewModel: StudyViewModel) {
                         onDeleteDownloadedVideo = {
                             val state = activePlayingLecture!!
                             viewModel.removeDownloadedVideo(state.subjectId, state.lecture.id)
+                        },
+                        onSaveVideoNote = { html ->
+                            val state = activePlayingLecture!!
+                            viewModel.saveVideoNote(state.subjectId, state.chapterName, state.lecture.id, html)
                         },
                         modifier = Modifier.padding(innerPadding)
                     )
@@ -207,6 +259,9 @@ fun StudyTrackerApp(viewModel: StudyViewModel) {
                         onSaveNotes = { subId, notes ->
                             viewModel.saveNotes(subId, notes)
                         },
+                        onDeleteDownloadedVideo = { subId, lecId ->
+                            viewModel.removeDownloadedVideo(subId, lecId)
+                        },
                         modifier = Modifier.padding(innerPadding)
                     )
                 }
@@ -228,7 +283,21 @@ fun StudyTrackerApp(viewModel: StudyViewModel) {
     // Settings Dialog (Favorites list + Dark/Light theme toggle)
     if (showSettingsDialog) {
         val favorites = remember(subjects) { viewModel.getAllFavorites() }
+        val downloads = remember(subjects) { viewModel.getAllDownloads() }
         SettingsDialog(
+            downloads = downloads,
+            initialTab = settingsInitialTab,
+            onPlayDownload = { item ->
+                showSettingsDialog = false
+                viewModel.playLecture(item.subjectId, item.subjectName, item.chapterName, item.lecture)
+            },
+            onDeleteDownload = { item ->
+                viewModel.deleteDownloadedVideo(item.subjectId, item.chapterName, item.lecture.id)
+            },
+            onDeleteAllDownloads = {
+                val n = viewModel.deleteAllDownloadedVideos()
+                Toast.makeText(context, "$n টি ডাউনলোড মুছে ফেলা হয়েছে", Toast.LENGTH_SHORT).show()
+            },
             favorites = favorites,
             currentTheme = themeMode,
             onThemeSelected = { viewModel.setThemeMode(it) },

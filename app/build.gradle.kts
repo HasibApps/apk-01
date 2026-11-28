@@ -17,8 +17,8 @@ android {
     applicationId = "com.aistudio.studytracker.kzrm"
     minSdk = 24
     targetSdk = 36
-    versionCode = 1
-    versionName = "1.0"
+    versionCode = 6
+    versionName = "6.0.0"
 
     // yt-dlp ইঞ্জিনের native ফাইল শুধু arm64 ফোনের জন্য (APK ছোট রাখতে)।
     // ফোন 32-bit হলে এখানে "armeabi-v7a" যোগ করুন (সাইজ দ্বিগুণ হবে)।
